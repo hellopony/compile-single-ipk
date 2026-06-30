@@ -19,8 +19,7 @@ git config --global user.email "${EMAIL}"
 git config --global user.name "aa"
 [ -n "${PASSWORD}" ] && git config --global user.password "${PASSWORD}"
 
-# 下载所有要编译的插件源码
-# SOURCECODEURL 可填多个仓库地址，用空格分隔
+# 下载所有要编译的插件源码（SOURCECODEURL 可填多个仓库地址，空格分隔）
 mkdir -p "${WORKDIR}/buildsource"
 cd "${WORKDIR}/buildsource"
 for url in $SOURCECODEURL; do
@@ -47,25 +46,27 @@ wrt32x_sdk_get() {
 }
 
 case "$BOARD" in
-    "X86")
-        x86_sdk_get
-        ;;
-    "WRT32X")
-        wrt32x_sdk_get
-        ;;
-    *)
-        echo "Unsupported board: $BOARD"
-        exit 1
-        ;;
+    "X86")    x86_sdk_get ;;
+    "WRT32X") wrt32x_sdk_get ;;
+    *) echo "Unsupported board: $BOARD"; exit 1 ;;
 esac
 
-cd openwrt-sdk
+cd "${WORKDIR}/openwrt-sdk"
 
-# 把要编译的插件源码作为本地 feed 加入
-sed -i "1i\\src-link githubaction ${WORKDIR}/buildsource" feeds.conf.default
-cat feeds.conf.default
+# 更新官方 feeds（仅用于解决依赖，不挂本地 src-link，避免重名冲突）
 ./scripts/feeds update -a
 ./scripts/feeds install -a
+
+# 把本地克隆的每个源码包，按其 Makefile 里的真实 PKG_NAME 直接复制进 package/
+for d in "${WORKDIR}"/buildsource/*/; do
+    [ -f "${d}Makefile" ] || continue
+    name="$(sed -n 's/^PKG_NAME[[:space:]]*:*=[[:space:]]*//p' "${d}Makefile" | head -n1 | tr -d '[:space:]')"
+    [ -n "$name" ] || name="$(basename "$d")"
+    echo ">>> package: $name  <=  $d"
+    rm -rf "package/$name"
+    cp -r "${d%/}" "package/$name"
+    rm -rf "package/$name/.git"
+done
 
 # ---------------- 目标平台配置 ----------------
 case "$BOARD" in
@@ -86,13 +87,16 @@ EOF
 esac
 
 make defconfig
-cat .config
 
-# 编译所有指定插件
-# PKGNAME 可填多个包名，用空格分隔
+# 编译所有指定插件（PKGNAME 可填多个包名，空格分隔）
 for pkg in $PKGNAME; do
+    if [ ! -d "package/$pkg" ]; then
+        echo "ERROR: package/$pkg 不存在，检查 PKGNAME 是否等于 Makefile 里的 PKG_NAME"
+        ls -1 package/ | grep -i vlmcsd || true
+        exit 1
+    fi
     echo ">>> compiling $pkg"
-    make V=s "package/feeds/githubaction/${pkg}/compile"
+    make V=s "package/$pkg/compile"
 done
 
 # 收集编译产物
