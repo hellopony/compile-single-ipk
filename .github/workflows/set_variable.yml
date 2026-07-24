@@ -2,21 +2,36 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: 'Select device'
+        description: 'Select target device'
         required: true
         type: choice
         options:
+          - R4SE
           - X86
           - WRT32X
           - AXT1800
           - SF1200
           - SFT1200
+      package:
+        description: 'Package preset (tailscale uses the SDK feed)'
+        required: true
+        type: choice
+        default: tailscale
+        options:
+          - tailscale
+          - custom
       sourcecode:
-        description: 'Source code URL'
-        required: true
+        description: 'Custom package source URL(s); leave empty for tailscale'
+        required: false
       pkgname:
-        description: 'Openwrt package name'
-        required: true
+        description: 'Custom OpenWrt package name(s); leave empty for tailscale'
+        required: false
+      sdk_url:
+        description: 'Optional exact SDK URL for R4SE (tar.xz/tar.zst/tgz)'
+        required: false
+      sdk_sha256:
+        description: 'Optional SHA256 for the custom R4SE SDK'
+        required: false
       email:
         description: 'Git account email address'
         required: false
@@ -35,15 +50,18 @@ jobs:
         env:
           SOURCECODEURL: ${{ github.event.inputs.sourcecode }}
           PKGNAME: ${{ github.event.inputs.pkgname }}
+          PACKAGE_PRESET: ${{ github.event.inputs.package }}
           BOARD: ${{ github.event.inputs.device }}
+          SDK_URL: ${{ github.event.inputs.sdk_url }}
+          SDK_SHA256: ${{ github.event.inputs.sdk_sha256 }}
           EMAIL: ${{ github.event.inputs.email }}
           PASSWORD: ${{ github.event.inputs.password }}
         run: |
-          cd $GITHUB_WORKSPACE
+          cd "$GITHUB_WORKSPACE"
           chmod +x ./build.sh
           ./build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.pkgname }}_related_ipks
+          name: ${{ github.event.inputs.device }}_${{ github.event.inputs.package }}_related_ipks
           path: |
             ./*ipk*
