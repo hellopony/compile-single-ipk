@@ -5,11 +5,11 @@
 fork 后会自动切到自己的仓库：
    1. 切到Action页面
    2. 选择set_variable 工作流
-   3. 点击run workflow按钮   . 选择需要编译的目标设备
-   4. 在下拉输入框source code URL中填入需要编译的插件源码地址（注意使用https，不要使用ssh, 例：https://github.com/luochongjun/edgerouter.git ）
-   5. 在下拉输入框Openwrt package name中填入需要编译的插件名 （要编译的插件名字，例：edgerouter）
+   3. 点击 Run workflow 按钮，选择需要编译的目标设备
+   4. 编译 Tailscale 时，Package preset 选择 `tailscale`，源码地址和包名留空
+   5. 编译自定义包时，Package preset 选择 `custom`，填写源码地址和包名
    6. 如果源代码需要认证信息可以输入邮箱和密码，如果没有则留空
-   7. 点击Run workflow
+   7. 点击 Run workflow
 
 接下来会自动执行编译，编译时间快的可能2，3分钟，取决于插件本身的编译时间
 
@@ -21,6 +21,49 @@ fork 后会自动切到自己的仓库：
 
 ```bash
 opkg install /tmp/*.ipk
+```
+
+## NanoPi R4SE / FriendlyWrt R23.7.7
+
+状态页显示的 `R23.7.7` 是 FriendlyWrt 的日期版开发快照，并不是 OpenWrt
+正式发行版号。NanoPi R4SE 对应的编译目标为 `rockchip/armv8`，生成的
+软件包架构为 `aarch64_generic`。
+
+工作流选择：
+
+```
+Select target device: R4SE
+Package preset: tailscale
+Source code URL(s): 留空
+OpenWrt package name(s): 留空
+```
+
+默认使用最接近该快照且仍能公开下载的 OpenWrt 23.05.0-rc2 SDK
+（GCC 12.3.0 / musl）。它用于编译 Tailscale 等用户态程序。默认 SDK 的
+内核 ABI 是 5.15.118，而截图中的 FriendlyWrt 内核是 5.15.120，因此不要
+安装默认构建产生的任何 `kmod-*.ipk`。
+
+Tailscale 依赖 `kmod-tun`。先在路由器上确认它已由当前 FriendlyWrt 安装：
+
+```bash
+opkg list-installed | grep '^kmod-tun '
+```
+
+如果缺少 `kmod-tun`，应从这台路由器当前配置的 FriendlyWrt 软件源安装，
+不能使用其他内核版本编译的 kmod。
+
+如果从 FriendlyELEC 下载到了与当前固件完全匹配的 SDK，可以在运行工作流
+时填写 `sdk_url`；建议同时填写 `sdk_sha256`。支持 `.tar.xz`、`.tar.zst`
+和 `.tgz` SDK。这样也可以安全编译内核模块。
+
+Tailscale 来自 SDK 固定的 OpenWrt packages feed。默认 RC2 SDK 会生成
+`tailscale` 和 `tailscaled` 两个 1.40.1 软件包，安装时两者都需要：
+
+```bash
+opkg install /tmp/tailscaled_*.ipk /tmp/tailscale_*.ipk
+/etc/init.d/tailscale enable
+/etc/init.d/tailscale start
+tailscale up
 ```
 
 ## 可选的包
@@ -52,6 +95,10 @@ opkg install /tmp/*.ipk
       <tr>
          <td>https://github.com/openwrt-packages/luci-app-clash</td>
          <td>luci-app-clash</td>
+      </tr>
+      <tr>
+         <td>OpenWrt packages feed（无需填写源码 URL）</td>
+         <td>tailscale / tailscaled</td>
       </tr>
    </tbody>
 </table>
