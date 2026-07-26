@@ -2,9 +2,10 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: 'Select target device'
+        description: 'Select target device (choose R4SE for NanoPi R4SE)'
         required: true
         type: choice
+        default: R4SE
         options:
           - R4SE
           - X86
@@ -63,5 +64,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.device }}_${{ github.event.inputs.package }}_related_ipks
+          if-no-files-found: error
           path: |
-            ./*ipk*
+            ./ipk-output/*.ipk
