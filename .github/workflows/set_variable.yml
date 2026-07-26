@@ -1,69 +1,91 @@
+name: Build device-specific IPK
+
 on:
   workflow_dispatch:
     inputs:
       device:
-        description: 'Select target device (choose R4SE for NanoPi R4SE)'
+        description: "Target device"
         required: true
         type: choice
         default: R4SE
         options:
           - R4SE
-          - X86
           - WRT32X
-          - AXT1800
-          - SF1200
-          - SFT1200
-      package:
-        description: 'Package preset (tailscale uses the SDK feed)'
+          - GL-MT3600BE
+      firmware_version:
+        description: "Firmware version/revision registered in profiles (for example R25.8.8)"
         required: true
-        type: choice
-        default: tailscale
-        options:
-          - tailscale
-          - custom
-      sourcecode:
-        description: 'Custom package source URL(s); leave empty for tailscale'
+        type: string
+        default: "R25.8.8"
+      kernel_version:
+        description: "Exact running kernel version (for example 6.12.42)"
+        required: true
+        type: string
+        default: "6.12.42"
+      package_names:
+        description: "Output IPK package name(s), separated by spaces or commas"
+        required: true
+        type: string
+      source_url:
+        description: "HTTPS Git repository; leave empty to build a package already in SDK feeds"
         required: false
-      pkgname:
-        description: 'Custom OpenWrt package name(s); leave empty for tailscale'
+        type: string
+      source_ref:
+        description: "Optional Git branch, tag, or commit"
         required: false
-      sdk_url:
-        description: 'Optional exact SDK URL for R4SE (tar.xz/tar.zst/tgz)'
+        type: string
+      package_subdir:
+        description: "Optional package subdirectory path(s); empty enables recursive auto-discovery"
         required: false
-      sdk_sha256:
-        description: 'Optional SHA256 for the custom R4SE SDK'
+        type: string
+      custom_sdk_url:
+        description: "Advanced: exact SDK URL for an unregistered firmware version"
         required: false
-      email:
-        description: 'Git account email address'
+        type: string
+      custom_sdk_sha256:
+        description: "Advanced: required SHA256 when custom_sdk_url is supplied"
         required: false
-      password:
-        description: 'Git account password'
-        required: false
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  setpackage:
+  build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-      - name: build ipk
-        id: build
-        env:
-          SOURCECODEURL: ${{ github.event.inputs.sourcecode }}
-          PKGNAME: ${{ github.event.inputs.pkgname }}
-          PACKAGE_PRESET: ${{ github.event.inputs.package }}
-          BOARD: ${{ github.event.inputs.device }}
-          SDK_URL: ${{ github.event.inputs.sdk_url }}
-          SDK_SHA256: ${{ github.event.inputs.sdk_sha256 }}
-          EMAIL: ${{ github.event.inputs.email }}
-          PASSWORD: ${{ github.event.inputs.password }}
+
+      - name: Validate profiles and build helpers
         run: |
-          cd "$GITHUB_WORKSPACE"
-          chmod +x ./build.sh
+          python3 ./tests/test-profile-resolver.py
+          bash ./tests/test-build-helpers.sh
+          bash -n ./build.sh
+
+      - name: Build requested IPK
+        env:
+          DEVICE: ${{ inputs.device }}
+          FIRMWARE_VERSION: ${{ inputs.firmware_version }}
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+          PACKAGE_NAMES: ${{ inputs.package_names }}
+          SOURCE_URL: ${{ inputs.source_url }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          PACKAGE_SUBDIR: ${{ inputs.package_subdir }}
+          CUSTOM_SDK_URL: ${{ inputs.custom_sdk_url }}
+          CUSTOM_SDK_SHA256: ${{ inputs.custom_sdk_sha256 }}
+        run: |
+          chmod +x ./build.sh ./scripts/resolve-profile.py
           ./build.sh
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload selected packages and compatibility report
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.device }}_${{ github.event.inputs.package }}_related_ipks
+          name: ipk-${{ inputs.device }}-${{ github.run_number }}
           if-no-files-found: error
+          retention-days: 14
           path: |
             ./ipk-output/*.ipk
+            ./ipk-output/build-manifest.txt
+            ./ipk-output/check-before-install.sh
