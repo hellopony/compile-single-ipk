@@ -107,7 +107,11 @@ install_host_dependencies() {
     sudo -E apt-get update
     sudo -E apt-get install -y \
         build-essential ca-certificates file gawk gettext git libncurses-dev \
-        libssl-dev python3 rsync unzip wget xz-utils xsltproc zlib1g-dev zstd
+        libssl-dev python3 python3-dev python3-pyelftools python3-setuptools \
+        rsync swig unzip wget xz-utils xsltproc zlib1g-dev zstd
+
+    python3 -c 'import elftools' ||
+        die "python3-pyelftools was installed, but Python cannot import elftools"
 }
 
 extract_sdk() {
