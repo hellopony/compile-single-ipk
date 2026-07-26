@@ -1,0 +1,9 @@
+/.ipk-build-start
+/.resolved-profile.env
+/buildsource/
+/ipk-control.*/
+/ipk-output/
+/openwrt-sdk.archive
+/openwrt-sdk/
+__pycache__/
+*.pyc
