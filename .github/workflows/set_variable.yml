@@ -56,7 +56,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate profiles and build helpers
         run: |
@@ -80,7 +80,7 @@ jobs:
           ./build.sh
 
       - name: Upload selected packages and compatibility report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ipk-${{ inputs.device }}-${{ github.run_number }}
           if-no-files-found: error
