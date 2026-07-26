@@ -197,6 +197,10 @@ resolve_package_dir() {
     return 1
 }
 
+# 仅收集这个标记之后新生成的自定义包，避免把 SDK 自带的所有 ipk 上传。
+BUILD_MARKER="${WORKDIR}/.ipk-build-start"
+touch "$BUILD_MARKER"
+
 # 编译所有指定插件（PKGNAME 可填多个包名，空格分隔）
 for pkg in $PKGNAME; do
     if ! package_dir="$(resolve_package_dir "$pkg")"; then
@@ -208,6 +212,54 @@ for pkg in $PKGNAME; do
     make V=s "${package_dir}/compile"
 done
 
-# 收集编译产物
-find bin -type f -name "*.ipk" -exec ls -lh {} \;
-find bin -type f -name "*.ipk" -exec cp -f {} "${WORKDIR}" \;
+# ---------------- 收集本次编译产物 ----------------
+OUTPUT_DIR="${WORKDIR}/ipk-output"
+mkdir -p "$OUTPUT_DIR"
+
+artifacts=()
+if [ "$PACKAGE_PRESET" = "tailscale" ]; then
+    # tailscale 的同一个 Makefile 在旧版 feed 中会生成 tailscale 和 tailscaled。
+    # 只上传这两个文件，不上传 SDK 预置的固件、kmod 和其他无关软件包。
+    mapfile -d '' -t artifacts < <(
+        find bin -type f \
+            \( -name "tailscale_*.ipk" -o -name "tailscaled_*.ipk" \) \
+            -newer "$BUILD_MARKER" -print0
+    )
+else
+    mapfile -d '' -t artifacts < <(
+        find bin -type f -name "*.ipk" -newer "$BUILD_MARKER" -print0
+    )
+fi
+
+if [ "${#artifacts[@]}" -eq 0 ]; then
+    echo "ERROR: compilation finished but no matching ipk artifacts were found"
+    exit 1
+fi
+
+for artifact in "${artifacts[@]}"; do
+    filename="$(basename "$artifact")"
+
+    # R4SE 的二进制包必须是 aarch64_generic。架构无关的纯脚本包允许为 all。
+    if [ "$BOARD" = "R4SE" ]; then
+        case "$filename" in
+            *_aarch64_generic.ipk|*_all.ipk)
+                ;;
+            *)
+                echo "ERROR: refusing non-R4SE artifact: $filename"
+                echo "ERROR: expected architecture suffix aarch64_generic (or all)"
+                exit 1
+                ;;
+        esac
+    fi
+
+    echo ">>> artifact: $filename"
+    cp -f "$artifact" "$OUTPUT_DIR/"
+done
+
+if [ "$PACKAGE_PRESET" = "tailscale" ] && [ "$BOARD" = "R4SE" ]; then
+    if ! find "$OUTPUT_DIR" -maxdepth 1 -type f \
+        -name "tailscale*_aarch64_generic.ipk" -print -quit | grep -q .; then
+        echo "ERROR: no aarch64_generic Tailscale package was produced"
+        exit 1
+    fi
+fi
