@@ -109,7 +109,6 @@ install_host_dependencies() {
         build-essential ca-certificates file gawk gettext git libncurses-dev \
         libssl-dev python3 python3-dev python3-pyelftools python3-setuptools \
         rsync swig unzip wget xz-utils xsltproc zlib1g-dev zstd
-
     python3 -c 'import elftools' ||
         die "python3-pyelftools was installed, but Python cannot import elftools"
 }
@@ -321,7 +320,18 @@ extract_ipk_control() {
 
     (
         cd "$temp_dir"
-        ar x "$ipk"
+
+        # OpenWrt 24.10 packages use a gzip-compressed tar container, while
+        # older feeds may still provide Debian-style ar containers.
+        if tar -tf "$ipk" >/dev/null 2>&1; then
+            tar -xf "$ipk"
+        elif ar t "$ipk" >/dev/null 2>&1; then
+            ar x "$ipk"
+        else
+            echo "unsupported IPK container format: $ipk" >&2
+            exit 4
+        fi
+
         member="$(find . -maxdepth 1 -type f -name 'control.tar.*' -print -quit)"
         [[ -n "$member" ]] || exit 2
         tar -xf "$member"
