@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "devices": {
+    "WRT32X": {
+      "display_name": "Linksys WRT32X",
+      "board_name": "linksys,wrt32x",
+      "target": "mvebu",
+      "subtarget": "cortexa9",
+      "expected_architectures": [
+        "arm_cortex-a9_vfpv3-d16"
+      ],
+      "target_config": [
+        "CONFIG_TARGET_mvebu=y",
+        "CONFIG_TARGET_mvebu_cortexa9=y",
+        "CONFIG_TARGET_mvebu_cortexa9_DEVICE_linksys_wrt32x=y"
+      ],
+      "custom_sdk_supported": true
+    },
+    "R4SE": {
+      "display_name": "FriendlyElec NanoPi R4SE",
+      "board_name": "friendlyarm,nanopi-r4se",
+      "target": "rockchip",
+      "subtarget": "armv8",
+      "expected_architectures": [
+        "aarch64_generic"
+      ],
+      "target_config": [
+        "CONFIG_TARGET_rockchip=y",
+        "CONFIG_TARGET_rockchip_armv8=y"
+      ],
+      "custom_sdk_supported": true
+    },
+    "GL-MT3600BE": {
+      "display_name": "GL.iNET GL-MT3600BE (Beryl 7)",
+      "board_name": "glinet,gl-mt3600be",
+      "target": "",
+      "subtarget": "",
+      "expected_architectures": [],
+      "target_config": [],
+      "custom_sdk_supported": false
+    }
+  },
+  "profiles": [
+    {
+      "id": "wrt32x-openwrt-24.10.0",
+      "status": "ready",
+      "device": "WRT32X",
+      "firmware_version": "24.10.0",
+      "firmware_aliases": [
+        "OpenWrt 24.10.0"
+      ],
+      "kernel_version": "6.6.73",
+      "kernel_abi": "b4e6dc3c3253bf5b438f90392080acc3",
+      "sdk_url": "https://downloads.openwrt.org/releases/24.10.0/targets/mvebu/cortexa9/openwrt-sdk-24.10.0-mvebu-cortexa9_gcc-13.3.0_musl_eabi.Linux-x86_64.tar.zst",
+      "sdk_sha256": "be4169657f0a62b6a578176720ee05b5d01ee299826b7baff8ef6a5d0c5ef26e",
+      "source_repo": "https://github.com/openwrt/openwrt",
+      "source_commit": "v24.10.0",
+      "allow_kmods": true,
+      "notes": "Only compatible with the official OpenWrt 24.10.0 kernel ABI recorded here."
+    },
+    {
+      "id": "r4se-lede-r25.8.8",
+      "status": "ready",
+      "device": "R4SE",
+      "firmware_version": "R25.8.8",
+      "firmware_aliases": [
+        "25.8.8",
+        "LEDE R25.8.8"
+      ],
+      "base_openwrt_version": "24.10.2",
+      "kernel_version": "6.12.42",
+      "kernel_abi": "f4827afbd0f193bf8697617cf19ff655",
+      "sdk_url": "https://downloads.openwrt.org/releases/24.10.2/targets/rockchip/armv8/openwrt-sdk-24.10.2-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst",
+      "sdk_sha256": "a5a14d5791989ad552520141e95c11fa54561f567ada9cdc091ec927a5b39f03",
+      "source_repo": "https://github.com/coolsnowwolf/lede",
+      "source_commit": "02e01b92d35077a7ad48fb7a648f4389c7b5224d",
+      "allow_kmods": false,
+      "notes": "The SDK matches the userspace ABI. The installed LEDE kernel differs from the official OpenWrt 24.10.2 kernel, so kmod packages are intentionally blocked."
+    },
+    {
+      "id": "gl-mt3600be-gl-4.9.0",
+      "status": "blocked",
+      "device": "GL-MT3600BE",
+      "firmware_version": "4.9.0",
+      "firmware_aliases": [
+        "GL 4.9.0"
+      ],
+      "kernel_version": "",
+      "kernel_abi": "",
+      "sdk_url": "",
+      "sdk_sha256": "",
+      "source_repo": "",
+      "source_commit": "",
+      "allow_kmods": false,
+      "notes": "Reserved for the future device. GL.iNET currently identifies this firmware as an MTK SDK/OpenWrt 21.02 build, but an exact public SDK, target, package architecture, and kernel ABI have not been verified."
+    }
+  ]
+}
