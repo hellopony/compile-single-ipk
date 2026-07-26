@@ -38,6 +38,9 @@ Source code URL(s): 留空
 OpenWrt package name(s): 留空
 ```
 
+下载的 GitHub Actions 制品名称必须以 `R4SE_` 开头。若名称以 `X86_`
+开头，说明运行工作流时选择了 X86，里面的 `x86_64.ipk` 不能安装到 R4SE。
+
 默认使用最接近该快照且仍能公开下载的 OpenWrt 23.05.0-rc2 SDK
 （GCC 12.3.0 / musl）。它用于编译 Tailscale 等用户态程序。默认 SDK 的
 内核 ABI 是 5.15.118，而截图中的 FriendlyWrt 内核是 5.15.120，因此不要
@@ -65,6 +68,10 @@ opkg install /tmp/tailscaled_*.ipk /tmp/tailscale_*.ipk
 /etc/init.d/tailscale start
 tailscale up
 ```
+
+工作流只会上传 `tailscale_*.ipk` 和 `tailscaled_*.ipk`，不会再把 SDK
+自带的固件、内核模块和其他无关 ipk 一并放进制品。R4SE 构建若生成的
+文件不是 `aarch64_generic.ipk`，任务会直接报错而不会上传错误架构的文件。
 
 ## 可选的包
 
