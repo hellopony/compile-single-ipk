@@ -1,265 +1,494 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-SOURCECODEURL="${SOURCECODEURL:-}"
-PKGNAME="${PKGNAME:-}"
-PACKAGE_PRESET="${PACKAGE_PRESET:-custom}"
-BOARD="${BOARD:-}"
-SDK_URL="${SDK_URL:-}"
-SDK_SHA256="${SDK_SHA256:-}"
-EMAIL=${EMAIL:-"aa@163.com"}
-PASSWORD="${PASSWORD:-}"
+DEVICE="${DEVICE:-${BOARD:-}}"
+FIRMWARE_VERSION="${FIRMWARE_VERSION:-}"
+KERNEL_VERSION="${KERNEL_VERSION:-}"
+PACKAGE_NAMES="${PACKAGE_NAMES:-${PKGNAME:-}}"
+SOURCE_URL="${SOURCE_URL:-${SOURCECODEURL:-}}"
+SOURCE_REF="${SOURCE_REF:-}"
+PACKAGE_SUBDIR="${PACKAGE_SUBDIR:-}"
+CUSTOM_SDK_URL="${CUSTOM_SDK_URL:-${SDK_URL:-}}"
+CUSTOM_SDK_SHA256="${CUSTOM_SDK_SHA256:-${SDK_SHA256:-}}"
 
-if [ "$PACKAGE_PRESET" = "tailscale" ]; then
-    SOURCECODEURL=""
-    PKGNAME="tailscale"
-elif [ "$PACKAGE_PRESET" != "custom" ]; then
-    echo "ERROR: unknown package preset: $PACKAGE_PRESET"
+WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROFILE_FILE="${WORKDIR}/profiles/firmware-profiles.json"
+PROFILE_ENV="${WORKDIR}/.resolved-profile.env"
+SDK_DIR="${WORKDIR}/openwrt-sdk"
+SOURCE_DIR="${WORKDIR}/buildsource"
+OUTPUT_DIR="${WORKDIR}/ipk-output"
+SDK_ARCHIVE="${WORKDIR}/openwrt-sdk.archive"
+BUILD_MARKER="${WORKDIR}/.ipk-build-start"
+
+die() {
+    echo "ERROR: $*" >&2
     exit 1
-fi
+}
 
-if [ -z "$BOARD" ]; then
-    echo "ERROR: BOARD is required"
-    exit 1
-fi
+trim_and_split() {
+    tr ',\r\n\t' '    ' <<<"$1" | xargs
+}
 
-if [ -z "$PKGNAME" ]; then
-    echo "ERROR: PKGNAME is required when package preset is custom"
-    exit 1
-fi
+validate_package_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9+_.@-]*$ ]] ||
+        die "invalid OpenWrt package name: $1"
+}
 
-echo SOURCECODEURL: "$SOURCECODEURL"
-echo PKGNAME: "$PKGNAME"
-echo PACKAGE_PRESET: "$PACKAGE_PRESET"
-echo BOARD: "$BOARD"
-echo EMAIL: "$EMAIL"
+validate_source_subdir() {
+    local subdir="$1"
+    [[ -n "$subdir" ]] || return 0
+    [[ "$subdir" != /* && "$subdir" != *".."* ]] ||
+        die "package subdirectory must be a relative path without '..': $subdir"
+}
 
-WORKDIR="$(pwd)"
+require_inputs() {
+    [[ -n "$DEVICE" ]] || die "DEVICE is required"
+    [[ -n "$FIRMWARE_VERSION" ]] || die "FIRMWARE_VERSION is required"
+    [[ -n "$KERNEL_VERSION" ]] || die "KERNEL_VERSION is required"
+    [[ -n "$PACKAGE_NAMES" ]] || die "PACKAGE_NAMES is required"
 
-# 使用预编译 SDK，依赖精简到现代 Ubuntu 能装上的包
-sudo -E apt-get update
-sudo -E apt-get install -y \
-    build-essential git gawk gettext unzip wget rsync file python3 \
-    libncurses-dev zlib1g-dev libssl-dev xsltproc xz-utils zstd
+    if [[ -n "$SOURCE_URL" && "$SOURCE_URL" != https://* ]]; then
+        die "SOURCE_URL must use HTTPS"
+    fi
+    if [[ -n "$SOURCE_REF" ]] &&
+        [[ ! "$SOURCE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/@+-]*$ ]]; then
+        die "SOURCE_REF contains unsupported characters"
+    fi
 
-git config --global user.email "${EMAIL}"
-git config --global user.name "aa"
-[ -n "${PASSWORD}" ] && git config --global user.password "${PASSWORD}"
-
-# 下载所有要编译的插件源码（SOURCECODEURL 可填多个仓库地址，空格分隔）
-if [ -n "$SOURCECODEURL" ]; then
-    mkdir -p "${WORKDIR}/buildsource"
-    cd "${WORKDIR}/buildsource"
-    for url in $SOURCECODEURL; do
-        echo ">>> cloning $url"
-        git clone "$url"
+    local normalized
+    normalized="$(trim_and_split "$PACKAGE_NAMES")"
+    [[ -n "$normalized" ]] || die "no package names were supplied"
+    read -r -a REQUESTED_PACKAGES <<<"$normalized"
+    for package_name in "${REQUESTED_PACKAGES[@]}"; do
+        validate_package_name "$package_name"
     done
-    cd "${WORKDIR}"
-fi
 
-# ---------------- SDK 下载函数 ----------------
+    normalized="$(trim_and_split "$PACKAGE_SUBDIR")"
+    PACKAGE_SUBDIRS=()
+    if [[ -n "$normalized" ]]; then
+        read -r -a PACKAGE_SUBDIRS <<<"$normalized"
+        for subdir in "${PACKAGE_SUBDIRS[@]}"; do
+            validate_source_subdir "$subdir"
+        done
+    fi
+}
+
+resolve_profile() {
+    python3 "${WORKDIR}/scripts/resolve-profile.py" \
+        --profiles "$PROFILE_FILE" \
+        --device "$DEVICE" \
+        --firmware "$FIRMWARE_VERSION" \
+        --kernel "$KERNEL_VERSION" \
+        --custom-sdk-url "$CUSTOM_SDK_URL" \
+        --custom-sdk-sha256 "$CUSTOM_SDK_SHA256" \
+        --output "$PROFILE_ENV"
+
+    # The generated file contains only trusted values read from the repository's
+    # profile registry, plus shell-quoted workflow inputs.
+    # shellcheck disable=SC1090
+    source "$PROFILE_ENV"
+
+    echo "Profile:      $PROFILE_ID"
+    echo "Device:       $PROFILE_DISPLAY_NAME"
+    echo "Firmware:     $PROFILE_FIRMWARE_VERSION"
+    echo "Kernel:       $PROFILE_KERNEL_VERSION"
+    echo "Target:       $PROFILE_TARGET/$PROFILE_SUBTARGET"
+    echo "Architecture: $(tr '\n' ' ' <<<"$PROFILE_EXPECTED_ARCHES")"
+    echo "Allow kmods:  $PROFILE_ALLOW_KMODS"
+}
+
+prepare_workspace() {
+    rm -rf -- "$SDK_DIR" "$SOURCE_DIR" "$OUTPUT_DIR"
+    rm -f -- "$SDK_ARCHIVE" "$PROFILE_ENV" "$BUILD_MARKER"
+    mkdir -p "$SDK_DIR" "$OUTPUT_DIR"
+}
+
+install_host_dependencies() {
+    sudo -E apt-get update
+    sudo -E apt-get install -y \
+        build-essential ca-certificates file gawk gettext git libncurses-dev \
+        libssl-dev python3 rsync unzip wget xz-utils xsltproc zlib1g-dev zstd
+}
+
 extract_sdk() {
     local archive="$1"
-    mkdir -p "${WORKDIR}/openwrt-sdk"
+    local archive_type
+    archive_type="$(file -b "$archive")"
 
-    case "$(file -b "$archive")" in
+    case "$archive_type" in
         *XZ*)
-            tar -Jxf "$archive" -C "${WORKDIR}/openwrt-sdk" --strip-components=1
+            tar -Jxf "$archive" -C "$SDK_DIR" --strip-components=1
             ;;
         *Zstandard*)
-            tar --zstd -xf "$archive" -C "${WORKDIR}/openwrt-sdk" --strip-components=1
+            tar --zstd -xf "$archive" -C "$SDK_DIR" --strip-components=1
             ;;
         *gzip*)
-            tar -zxf "$archive" -C "${WORKDIR}/openwrt-sdk" --strip-components=1
+            tar -zxf "$archive" -C "$SDK_DIR" --strip-components=1
             ;;
         *)
-            echo "ERROR: unsupported SDK archive format: $(file -b "$archive")"
-            exit 1
+            die "unsupported SDK archive format: $archive_type"
             ;;
     esac
 }
 
 download_sdk() {
-    local url="$1"
-    local expected_sha256="${2:-}"
-    local archive="${WORKDIR}/openwrt-sdk.archive"
-
-    wget -q --show-progress -O "$archive" "$url"
-    if [ -n "$expected_sha256" ]; then
-        echo "${expected_sha256}  ${archive}" | sha256sum -c -
-    fi
-    extract_sdk "$archive"
+    echo "Downloading verified SDK:"
+    echo "  $PROFILE_SDK_URL"
+    wget -q --show-progress -O "$SDK_ARCHIVE" "$PROFILE_SDK_URL"
+    echo "${PROFILE_SDK_SHA256}  ${SDK_ARCHIVE}" | sha256sum -c -
+    extract_sdk "$SDK_ARCHIVE"
+    [[ -x "${SDK_DIR}/scripts/feeds" ]] ||
+        die "the downloaded archive is not an OpenWrt SDK"
 }
 
-x86_sdk_get() {
-    download_sdk \
-        "https://downloads.openwrt.org/releases/21.02.3/targets/x86/64/openwrt-sdk-21.02.3-x86-64_gcc-8.4.0_musl.Linux-x86_64.tar.xz"
-}
+clone_source() {
+    [[ -n "$SOURCE_URL" ]] || return 0
 
-# Linksys WRT32X = mvebu / cortexa9，内核 6.6 对应官方 24.10 版本
-# 注意：24.10 的 SDK 是 .tar.zst（zstd 压缩），不是 .tar.xz
-wrt32x_sdk_get() {
-    download_sdk \
-        "https://downloads.openwrt.org/releases/24.10.0/targets/mvebu/cortexa9/openwrt-sdk-24.10.0-mvebu-cortexa9_gcc-13.3.0_musl_eabi.Linux-x86_64.tar.zst"
-}
-
-# NanoPi R4SE 使用 rockchip/armv8，ipk 架构为 aarch64_generic。
-# 截图中的 FriendlyWrt R23.7.7 是 2023 年 7 月的开发快照，不是 OpenWrt
-# 正式版本号。默认使用时间和工具链最接近的 23.05.0-rc2 SDK。
-# 它适合编译 tailscale 等用户态包；kmod 必须改用与路由器内核 ABI 完全
-# 一致的 FriendlyWrt SDK，并通过工作流的 sdk_url/sdk_sha256 传入。
-r4se_sdk_get() {
-    local default_url
-    local default_sha256
-
-    default_url="https://downloads.openwrt.org/releases/23.05.0-rc2/targets/rockchip/armv8/openwrt-sdk-23.05.0-rc2-rockchip-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
-    default_sha256="3bc93674f741a3601ecebc78a7bda285e20ad4d30ee5b4e184db9da3176a240b"
-
-    if [ -n "$SDK_URL" ]; then
-        echo ">>> using custom R4SE SDK: $SDK_URL"
-        download_sdk "$SDK_URL" "$SDK_SHA256"
+    mkdir -p "$SOURCE_DIR"
+    if [[ -n "$SOURCE_REF" ]]; then
+        git clone --filter=blob:none --no-checkout "$SOURCE_URL" "${SOURCE_DIR}/repo"
+        git -C "${SOURCE_DIR}/repo" fetch --depth 1 origin "$SOURCE_REF"
+        git -C "${SOURCE_DIR}/repo" checkout --detach FETCH_HEAD
     else
-        echo ">>> using OpenWrt 23.05.0-rc2 rockchip/armv8 SDK"
-        download_sdk "$default_url" "$default_sha256"
+        git clone --depth 1 "$SOURCE_URL" "${SOURCE_DIR}/repo"
     fi
+    git -C "${SOURCE_DIR}/repo" rev-parse HEAD >"${SOURCE_DIR}/source-commit.txt"
 }
 
-case "$BOARD" in
-    "R4SE")   r4se_sdk_get ;;
-    "X86")    x86_sdk_get ;;
-    "WRT32X") wrt32x_sdk_get ;;
-    *) echo "Unsupported board: $BOARD"; exit 1 ;;
-esac
+is_openwrt_package_makefile() {
+    local makefile="$1"
+    grep -Fq '$(TOPDIR)/rules.mk' "$makefile" &&
+        grep -Eq '\$\(eval[[:space:]]+\$\(call[[:space:]]+BuildPackage' "$makefile"
+}
 
-cd "${WORKDIR}/openwrt-sdk"
+copy_package_directory() {
+    local source_path="$1"
+    local index="$2"
+    local base safe destination
 
-# 更新官方 feeds（仅用于解决依赖，不挂本地 src-link，避免重名冲突）
-./scripts/feeds update -a
-./scripts/feeds install -a
+    [[ -f "${source_path}/Makefile" ]] ||
+        die "no Makefile found in package source directory: $source_path"
+    is_openwrt_package_makefile "${source_path}/Makefile" ||
+        die "not an OpenWrt package Makefile: ${source_path}/Makefile"
 
-# 把本地克隆的每个源码包，按其 Makefile 里的真实 PKG_NAME 直接复制进 package/。
-# tailscale 预设不克隆上游源码，而是直接使用 SDK 固定版本的 packages feed。
-if [ -d "${WORKDIR}/buildsource" ]; then
-    for d in "${WORKDIR}"/buildsource/*/; do
-        [ -f "${d}Makefile" ] || continue
-        name="$(sed -n 's/^PKG_NAME[[:space:]]*:*=[[:space:]]*//p' "${d}Makefile" | head -n1 | tr -d '[:space:]')"
-        [ -n "$name" ] || name="$(basename "$d")"
-        echo ">>> package: $name  <=  $d"
-        rm -rf "package/$name"
-        cp -r "${d%/}" "package/$name"
-        rm -rf "package/$name/.git"
+    base="$(basename "$source_path")"
+    safe="$(tr -cs 'A-Za-z0-9._-' '-' <<<"$base" | sed 's/^-//;s/-$//')"
+    destination="${SDK_DIR}/package/custom/${index}-${safe:-package}"
+    mkdir -p "$(dirname "$destination")"
+    cp -a "$source_path" "$destination"
+    rm -rf -- "${destination}/.git"
+    echo "Imported package source: ${source_path} -> ${destination#"$SDK_DIR/"}"
+}
+
+install_custom_package_sources() {
+    [[ -n "$SOURCE_URL" ]] || return 0
+
+    local repo="${SOURCE_DIR}/repo"
+    local index=0
+    local subdir makefile source_path
+
+    if ((${#PACKAGE_SUBDIRS[@]} > 0)); then
+        for subdir in "${PACKAGE_SUBDIRS[@]}"; do
+            source_path="${repo}/${subdir%/}"
+            [[ -d "$source_path" ]] ||
+                die "package subdirectory does not exist in source repository: $subdir"
+            index=$((index + 1))
+            copy_package_directory "$source_path" "$index"
+        done
+    else
+        while IFS= read -r -d '' makefile; do
+            if is_openwrt_package_makefile "$makefile"; then
+                index=$((index + 1))
+                copy_package_directory "$(dirname "$makefile")" "$index"
+            fi
+        done < <(
+            find "$repo" -path '*/.git' -prune -o -type f -name Makefile -print0
+        )
+    fi
+
+    ((index > 0)) ||
+        die "no OpenWrt package Makefile was found; set PACKAGE_SUBDIR explicitly"
+
+    # Prefer the explicitly supplied source over an SDK feed package with the
+    # same conventional directory name.
+    for package_name in "${REQUESTED_PACKAGES[@]}"; do
+        find "${SDK_DIR}/package/feeds" -mindepth 2 -maxdepth 2 \
+            -type l -name "$package_name" -delete 2>/dev/null || true
     done
-fi
+}
 
-# ---------------- 目标平台配置 ----------------
-case "$BOARD" in
-    "R4SE")
-        cat >> .config <<EOF
-CONFIG_TARGET_rockchip=y
-CONFIG_TARGET_rockchip_armv8=y
-CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y
-EOF
-        ;;
-    "X86")
-        cat >> .config <<EOF
-CONFIG_TARGET_x86=y
-CONFIG_TARGET_x86_64=y
-CONFIG_TARGET_x86_64_Generic=y
-EOF
-        ;;
-    "WRT32X")
-        cat >> .config <<EOF
-CONFIG_TARGET_mvebu=y
-CONFIG_TARGET_mvebu_cortexa9=y
-CONFIG_TARGET_mvebu_cortexa9_DEVICE_linksys_wrt32x=y
-EOF
-        ;;
-esac
+prepare_sdk_feeds() {
+    cd "$SDK_DIR"
+    ./scripts/feeds update -a
+    ./scripts/feeds install -a
+}
 
-make defconfig
+configure_sdk() {
+    cd "$SDK_DIR"
+    if [[ -n "$PROFILE_TARGET_CONFIG" ]]; then
+        while IFS= read -r config_line; do
+            [[ -n "$config_line" ]] && echo "$config_line" >>.config
+        done <<<"$PROFILE_TARGET_CONFIG"
+    fi
 
-resolve_package_dir() {
-    local pkg="$1"
-    local candidate
+    for package_name in "${REQUESTED_PACKAGES[@]}"; do
+        echo "CONFIG_PACKAGE_${package_name}=m" >>.config
+    done
+    make defconfig
+}
 
-    if [ -d "package/$pkg" ]; then
-        echo "package/$pkg"
+makefile_defines_package() {
+    local makefile="$1"
+    local package_name="$2"
+    local declared_name
+
+    if grep -Fq "Package/${package_name}" "$makefile" ||
+        grep -Fq "BuildPackage,${package_name})" "$makefile"; then
         return 0
     fi
 
-    for candidate in package/feeds/*/"$pkg"; do
-        if [ -d "$candidate" ]; then
+    declared_name="$(
+        sed -n \
+            's/^[[:space:]]*PKG_NAME[[:space:]]*:*=[[:space:]]*//p' \
+            "$makefile" |
+            head -n1 |
+            tr -d '[:space:]'
+    )"
+    [[ "$declared_name" == "$package_name" ]]
+}
+
+resolve_package_directory() {
+    local package_name="$1"
+    local candidate makefile
+
+    for candidate in \
+        "package/${package_name}" \
+        "package/custom/${package_name}" \
+        package/feeds/*/"${package_name}"; do
+        if [[ -f "${candidate}/Makefile" ]]; then
             echo "$candidate"
             return 0
         fi
     done
 
+    for candidate in package/custom package/feeds package; do
+        [[ -d "$candidate" ]] || continue
+        while IFS= read -r -d '' makefile; do
+            if makefile_defines_package "$makefile" "$package_name"; then
+                dirname "$makefile"
+                return 0
+            fi
+        done < <(
+            find -L "$candidate" -type f -name Makefile -print0 2>/dev/null
+        )
+    done
+
     return 1
 }
 
-# 仅收集这个标记之后新生成的自定义包，避免把 SDK 自带的所有 ipk 上传。
-BUILD_MARKER="${WORKDIR}/.ipk-build-start"
-touch "$BUILD_MARKER"
+compile_requested_packages() {
+    cd "$SDK_DIR"
+    declare -A build_directories=()
+    local package_name package_dir
 
-# 编译所有指定插件（PKGNAME 可填多个包名，空格分隔）
-for pkg in $PKGNAME; do
-    if ! package_dir="$(resolve_package_dir "$pkg")"; then
-        echo "ERROR: 找不到包 $pkg；请检查 PKGNAME，或确认它存在于当前 SDK 的 feeds 中"
-        find package -maxdepth 4 -type d -iname "*${pkg}*" -print || true
-        exit 1
-    fi
-    echo ">>> compiling $pkg from $package_dir"
-    make V=s "${package_dir}/compile"
-done
+    for package_name in "${REQUESTED_PACKAGES[@]}"; do
+        if ! package_dir="$(resolve_package_directory "$package_name")"; then
+            echo "Known custom package definitions:" >&2
+            find package/custom -type f -name Makefile -print 2>/dev/null || true
+            die "cannot find an OpenWrt package definition for: $package_name"
+        fi
+        build_directories["$package_dir"]=1
+        echo "Resolved package $package_name -> $package_dir"
+    done
 
-# ---------------- 收集本次编译产物 ----------------
-OUTPUT_DIR="${WORKDIR}/ipk-output"
-mkdir -p "$OUTPUT_DIR"
+    touch "$BUILD_MARKER"
+    for package_dir in "${!build_directories[@]}"; do
+        echo "Cleaning $package_dir"
+        make "${package_dir}/clean"
+        echo "Compiling $package_dir"
+        make V=s "${package_dir}/compile"
+    done
+}
 
-artifacts=()
-if [ "$PACKAGE_PRESET" = "tailscale" ]; then
-    # tailscale 的同一个 Makefile 在旧版 feed 中会生成 tailscale 和 tailscaled。
-    # 只上传这两个文件，不上传 SDK 预置的固件、kmod 和其他无关软件包。
-    mapfile -d '' -t artifacts < <(
-        find bin -type f \
-            \( -name "tailscale_*.ipk" -o -name "tailscaled_*.ipk" \) \
-            -newer "$BUILD_MARKER" -print0
+extract_ipk_control() {
+    local ipk="$1"
+    local temp_dir member
+    temp_dir="$(mktemp -d "${WORKDIR}/ipk-control.XXXXXX")"
+
+    (
+        cd "$temp_dir"
+        ar x "$ipk"
+        member="$(find . -maxdepth 1 -type f -name 'control.tar.*' -print -quit)"
+        [[ -n "$member" ]] || exit 2
+        tar -xf "$member"
+        [[ -f control ]] || exit 3
+        cat control
     )
-else
-    mapfile -d '' -t artifacts < <(
-        find bin -type f -name "*.ipk" -newer "$BUILD_MARKER" -print0
-    )
-fi
+    local result=$?
+    rm -rf -- "$temp_dir"
+    return "$result"
+}
 
-if [ "${#artifacts[@]}" -eq 0 ]; then
-    echo "ERROR: compilation finished but no matching ipk artifacts were found"
+architecture_is_allowed() {
+    local architecture="$1"
+    local expected
+
+    [[ "$architecture" == "all" || "$architecture" == "noarch" ]] && return 0
+    while IFS= read -r expected; do
+        [[ -n "$expected" && "$architecture" == "$expected" ]] && return 0
+    done <<<"$PROFILE_EXPECTED_ARCHES"
+    return 1
+}
+
+write_manifest_header() {
+    local source_commit=""
+    [[ -f "${SOURCE_DIR}/source-commit.txt" ]] &&
+        source_commit="$(<"${SOURCE_DIR}/source-commit.txt")"
+
+    {
+        echo "OpenWrt single-package build manifest"
+        echo
+        echo "Profile: ${PROFILE_ID}"
+        echo "Device: ${PROFILE_DISPLAY_NAME}"
+        echo "Board name: ${PROFILE_BOARD_NAME}"
+        echo "Firmware: ${PROFILE_FIRMWARE_VERSION}"
+        echo "Base OpenWrt: ${PROFILE_BASE_OPENWRT_VERSION}"
+        echo "Kernel: ${PROFILE_KERNEL_VERSION}"
+        echo "Kernel ABI: ${PROFILE_KERNEL_ABI:-not registered}"
+        echo "Target: ${PROFILE_TARGET}/${PROFILE_SUBTARGET}"
+        echo "Expected package architectures: $(tr '\n' ' ' <<<"$PROFILE_EXPECTED_ARCHES")"
+        echo "SDK: ${PROFILE_SDK_URL}"
+        echo "SDK SHA256: ${PROFILE_SDK_SHA256}"
+        echo "Profile source: ${PROFILE_SOURCE_REPO:-not registered}"
+        echo "Profile source commit: ${PROFILE_SOURCE_COMMIT:-not registered}"
+        echo "Package source: ${SOURCE_URL:-SDK feeds}"
+        echo "Package source ref: ${SOURCE_REF:-default branch/feed pin}"
+        echo "Package source commit: ${source_commit:-not applicable}"
+        echo "Package subdirectory: ${PACKAGE_SUBDIR:-auto-discovery/feed}"
+        echo "Requested packages: ${REQUESTED_PACKAGES[*]}"
+        echo "Kernel packages allowed: ${PROFILE_ALLOW_KMODS}"
+        echo "Notes: ${PROFILE_NOTES}"
+        echo
+        echo "Artifacts:"
+    } >"${OUTPUT_DIR}/build-manifest.txt"
+}
+
+write_install_check() {
+    cat >"${OUTPUT_DIR}/check-before-install.sh" <<EOF
+#!/bin/sh
+set -eu
+
+expected_board='${PROFILE_BOARD_NAME}'
+expected_kernel='${PROFILE_KERNEL_VERSION}'
+expected_arches='$(tr '\n' ' ' <<<"$PROFILE_EXPECTED_ARCHES") all noarch'
+
+board="\$(ubus call system board 2>/dev/null | jsonfilter -e '@.board_name' 2>/dev/null || true)"
+kernel="\$(uname -r)"
+architectures="\$(opkg print-architecture 2>/dev/null | awk '{print \$2}')"
+
+[ -z "\$expected_board" ] || [ "\$board" = "\$expected_board" ] || {
+    echo "ERROR: board mismatch: expected \$expected_board, got \${board:-unknown}" >&2
     exit 1
-fi
+}
+[ "\$kernel" = "\$expected_kernel" ] || {
+    echo "ERROR: kernel mismatch: expected \$expected_kernel, got \$kernel" >&2
+    exit 1
+}
 
-for artifact in "${artifacts[@]}"; do
-    filename="$(basename "$artifact")"
-
-    # R4SE 的二进制包必须是 aarch64_generic。架构无关的纯脚本包允许为 all。
-    if [ "$BOARD" = "R4SE" ]; then
-        case "$filename" in
-            *_aarch64_generic.ipk|*_all.ipk)
-                ;;
-            *)
-                echo "ERROR: refusing non-R4SE artifact: $filename"
-                echo "ERROR: expected architecture suffix aarch64_generic (or all)"
-                exit 1
-                ;;
-        esac
-    fi
-
-    echo ">>> artifact: $filename"
-    cp -f "$artifact" "$OUTPUT_DIR/"
+for expected in \$expected_arches; do
+    echo "\$architectures" | grep -Fxq "\$expected" && {
+        echo "Compatibility check passed for ${PROFILE_ID}."
+        exit 0
+    }
 done
 
-if [ "$PACKAGE_PRESET" = "tailscale" ] && [ "$BOARD" = "R4SE" ]; then
-    if ! find "$OUTPUT_DIR" -maxdepth 1 -type f \
-        -name "tailscale*_aarch64_generic.ipk" -print -quit | grep -q .; then
-        echo "ERROR: no aarch64_generic Tailscale package was produced"
-        exit 1
-    fi
+echo "ERROR: none of the expected package architectures are enabled: \$expected_arches" >&2
+exit 1
+EOF
+    chmod +x "${OUTPUT_DIR}/check-before-install.sh"
+}
+
+collect_artifacts() {
+    cd "$SDK_DIR"
+    write_manifest_header
+
+    declare -A selected_artifacts=()
+    local package_name artifact control package architecture depends
+
+    for package_name in "${REQUESTED_PACKAGES[@]}"; do
+        while IFS= read -r -d '' artifact; do
+            selected_artifacts["$artifact"]=1
+        done < <(
+            find bin -type f -name "${package_name}_*.ipk" \
+                -newer "$BUILD_MARKER" -print0
+        )
+    done
+
+    ((${#selected_artifacts[@]} > 0)) ||
+        die "compilation finished, but none of the requested IPKs were produced"
+
+    for artifact in "${!selected_artifacts[@]}"; do
+        control="$(extract_ipk_control "$(realpath "$artifact")")" ||
+            die "cannot read IPK control metadata: $artifact"
+        package="$(sed -n 's/^Package:[[:space:]]*//p' <<<"$control" | head -n1)"
+        architecture="$(sed -n 's/^Architecture:[[:space:]]*//p' <<<"$control" | head -n1)"
+        depends="$(sed -n 's/^Depends:[[:space:]]*//p' <<<"$control" | head -n1)"
+
+        [[ -n "$package" && -n "$architecture" ]] ||
+            die "IPK is missing Package or Architecture metadata: $artifact"
+
+        case " ${REQUESTED_PACKAGES[*]} " in
+            *" ${package} "*) ;;
+            *) die "refusing unexpected package artifact: $package" ;;
+        esac
+
+        architecture_is_allowed "$architecture" ||
+            die "architecture mismatch for $package: got $architecture; expected $(tr '\n' ' ' <<<"$PROFILE_EXPECTED_ARCHES") or all"
+
+        if [[ "$PROFILE_ALLOW_KMODS" != "true" ]]; then
+            case "$package" in
+                kernel|kmod-*)
+                    die "kernel package $package is blocked for profile $PROFILE_ID"
+                    ;;
+            esac
+        fi
+
+        cp -f "$artifact" "$OUTPUT_DIR/"
+        {
+            echo
+            echo "- File: $(basename "$artifact")"
+            echo "  Package: $package"
+            echo "  Architecture: $architecture"
+            echo "  Depends: ${depends:-none}"
+            echo "  SHA256: $(sha256sum "$artifact" | awk '{print $1}')"
+        } >>"${OUTPUT_DIR}/build-manifest.txt"
+        echo "Selected artifact: $(basename "$artifact")"
+    done
+
+    for package_name in "${REQUESTED_PACKAGES[@]}"; do
+        find "$OUTPUT_DIR" -maxdepth 1 -type f \
+            -name "${package_name}_*.ipk" -print -quit | grep -q . ||
+            die "requested output package was not produced: $package_name"
+    done
+
+    write_install_check
+}
+
+main() {
+    require_inputs
+    prepare_workspace
+    resolve_profile
+    install_host_dependencies
+    download_sdk
+    clone_source
+    prepare_sdk_feeds
+    install_custom_package_sources
+    configure_sdk
+    compile_requested_packages
+    collect_artifacts
+    echo "Build completed: ${OUTPUT_DIR}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
